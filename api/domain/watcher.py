@@ -301,6 +301,12 @@ async def watch_workspace(db: aiosqlite.Connection, workspace: Path) -> None:
                     await _remove_file(db, workspace, path)
             except Exception as e:  # noqa: BLE001 -- watcher must survive per-file failures
                 logger.warning("Watcher error for %s: %s", path_str, e)
+                # una scrittura fallita a meta' lascerebbe la transazione aperta su questa connessione
+                # e ogni scrittura dell'API morirebbe con "database is locked": si chiude qui
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
 
         # Clean up expired entries from _recently_written
         now = time.monotonic()
