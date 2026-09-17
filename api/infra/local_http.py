@@ -15,7 +15,17 @@ from urllib.parse import urlsplit
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+import os
+
+# Host aggiuntivi consentiti oltre al loopback (es. IP Tailscale), separati da
+# virgola: LOCAL_ALLOWED_HOSTS="100.118.22.128,2.tail220aa3.ts.net". Resta una
+# lista esatta, quindi la protezione anti DNS-rebinding vale ancora.
+_EXTRA_HOSTS = frozenset(
+    h.strip().lower()
+    for h in os.environ.get("LOCAL_ALLOWED_HOSTS", "").split(",")
+    if h.strip()
+)
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"}) | _EXTRA_HOSTS
 EXTENSION_ORIGIN_PATTERN = r"(?:chrome-extension|moz-extension)://[A-Za-z0-9._-]+"
 _EXTENSION_ORIGIN_RE = re.compile(EXTENSION_ORIGIN_PATTERN)
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
