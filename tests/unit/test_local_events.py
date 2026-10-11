@@ -1,11 +1,11 @@
 """SQLite parity tests for private knowledge-base activity."""
 
 import json
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
+from tests.helpers import kb as kb_helpers
 
 
 USER_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -97,7 +97,7 @@ async def test_local_source_extraction_and_hidden_assets_are_quiet(local_db):
     ]
 
 
-async def test_local_feed_endpoint_is_owner_scoped_and_cursor_paginated(local_db):
+async def test_local_feed_endpoint_is_owner_scoped_and_cursor_paginated(local_db, tmp_path):
     from routes.events import list_knowledge_base_events
 
     db = local_db
@@ -116,9 +116,14 @@ async def test_local_feed_endpoint_is_owner_scoped_and_cursor_paginated(local_db
         )
     await db.commit()
 
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(mode="local", sqlite_db=db, pool=None)),
-    )
+    # La rotta risolve la KB dalla richiesta: niente percorso e niente
+    # testata significa «il legacy», e qui il legacy di questa radice base E'
+    # KB_ID. Senza registrarlo, `apri_db` aprirebbe una SECONDA connessione
+    # sullo stesso file e le due si contenderebbero il lock.
+    base = tmp_path / "base"
+    base.mkdir()
+    request = kb_helpers.richiesta(base, kb_id=KB_ID, db=db)
+    kb_helpers.registra(base, KB_ID, db)
     first = await list_knowledge_base_events(
         UUID(KB_ID), request, USER_ID, limit=2, before=None,
     )
@@ -134,6 +139,18 @@ async def test_local_feed_endpoint_is_owner_scoped_and_cursor_paginated(local_db
             UUID(KB_ID), request, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", limit=2, before=None,
         )
     assert error.value.status_code == 404
+
+    # Una KB che la radice base non conosce non ripiega sul legacy: 404.
+    ignota = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    with pytest.raises(HTTPException) as mancante:
+        await list_knowledge_base_events(
+            UUID(ignota),
+            kb_helpers.richiesta(base, kb_id=ignota, db=db),
+            USER_ID, limit=2, before=None,
+        )
+    assert mancante.value.status_code == 404
+
+    kb_helpers.scorda(base)
 
 
 async def test_existing_local_database_gets_honest_idempotent_backfill(tmp_path):

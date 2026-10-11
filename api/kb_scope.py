@@ -354,6 +354,7 @@ async def crea_kb(
     radice_base: Path,
     kb_id: str | None = None,
     *,
+    user_id: str,
     descrizione: str | None = None,
     kind: str | None = None,
 ) -> tuple[str, bool]:
@@ -374,14 +375,14 @@ async def crea_kb(
         radice = radice_di(kb, radice_base)
         if kb_pronta(kb, radice_base):
             conn = await _apri_tenendo_il_lucchetto(kb, radice_base)
-            await _scrivi_identita(conn, kb, nome, descrizione, kind)
+            await _scrivi_identita(conn, kb, user_id, nome, descrizione, kind)
             return kb, False
 
         from infra.db.sqlite import create_pool
         await asyncio.to_thread(_mkdir, radice)
         conn = await create_pool(str(radice / NOME_DB), init_schema=True)
         try:
-            await _scrivi_identita(conn, kb, nome, descrizione, kind)
+            await _scrivi_identita(conn, kb, user_id, nome, descrizione, kind)
         except BaseException:
             # Non si lascia in cache una connessione di una KB che non e'
             # nata: la prossima richiesta la riaprirebbe e la troverebbe senza
@@ -398,7 +399,8 @@ async def crea_kb(
 
 
 async def _scrivi_identita(
-    conn, kb: str, nome: str | None, descrizione: str | None, kind: str | None,
+    conn, kb: str, user_id: str,
+    nome: str | None, descrizione: str | None, kind: str | None,
 ) -> None:
     """La riga `workspace` E' la knowledge base per il codice locale: senza, le
     letture tornerebbero vuote e `list()` non vedrebbe la KB appena creata.
@@ -413,9 +415,13 @@ async def _scrivi_identita(
             riga = await cur.fetchone()
             if riga is None:
                 await conn.execute(
+                    # user_id VERO, non la stringa 'local': il controllo di
+                    # proprieta' (eventi, grafo) confronta questa riga con
+                    # l'utente autenticato, e con 'local' ogni rotta che lo
+                    # fa rispondeva 404 su una wiki appena creata.
                     "INSERT INTO workspace (id, user_id, name, description, kind, created_at) "
-                    "VALUES (?, 'local', ?, ?, ?, datetime('now'))",
-                    (kb, nome or kb, descrizione or "", kind or "wiki"),
+                    "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+                    (kb, user_id, nome or kb, descrizione or "", kind or "wiki"),
                 )
             else:
                 campi = ["id = ?"]

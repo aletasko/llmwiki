@@ -1,11 +1,11 @@
 import asyncio
 import hashlib
 import threading
-from types import SimpleNamespace
 
 import pytest
 from domain import local_processor
 from fastapi import HTTPException
+from kb_scope import AmbitoKB
 from infra.db.sqlite import create_pool
 from routes import local_upload
 from services import chunker
@@ -25,12 +25,19 @@ class ChunkedUpload:
         return chunk
 
 
-async def _request_with_db(tmp_path):
+KB = "99999999-9999-4999-8999-999999999999"
+
+
+async def _scope_with_db(tmp_path):
+    """L'ambito della KB al posto della richiesta: la rotta non va piu' a
+    prendersi connessione e radice dallo stato dell'app."""
     db = await create_pool(str(tmp_path / "local.db"))
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(sqlite_db=db)),
-    )
-    return request, db
+    return AmbitoKB(kb_id=KB, radice=tmp_path, db=db), db
+
+
+def _scope_senza_db(tmp_path):
+    """Per i casi che devono fallire PRIMA di toccare il database."""
+    return AmbitoKB(kb_id=KB, radice=tmp_path, db=None)
 
 
 async def test_stream_upload_writes_chunks_and_hashes(monkeypatch, tmp_path):
@@ -127,15 +134,14 @@ async def test_cancellation_waits_for_active_rename_before_cleanup(monkeypatch, 
 
 
 async def test_duplicate_relative_path_preserves_first_file_and_row(monkeypatch, tmp_path):
-    monkeypatch.setattr(local_upload.settings, "WORKSPACE_PATH", str(tmp_path))
-    request, db = await _request_with_db(tmp_path)
+    scope, db = await _scope_with_db(tmp_path)
     try:
         first = b"first payload"
         created = await local_upload.upload_file(
             ChunkedUpload(first, "same.bin"),
             path="/",
             user_id="local-user",
-            request=request,
+            scope=scope,
         )
 
         with pytest.raises(HTTPException) as exc:
@@ -143,7 +149,7 @@ async def test_duplicate_relative_path_preserves_first_file_and_row(monkeypatch,
                 ChunkedUpload(b"replacement", "same.bin"),
                 path="/",
                 user_id="local-user",
-                request=request,
+                scope=scope,
             )
 
         assert exc.value.status_code == 409
@@ -159,7 +165,6 @@ async def test_duplicate_relative_path_preserves_first_file_and_row(monkeypatch,
 
 
 async def test_image_is_scheduled_but_unknown_binary_is_ready(monkeypatch, tmp_path):
-    monkeypatch.setattr(local_upload.settings, "WORKSPACE_PATH", str(tmp_path))
     processed = asyncio.Event()
     processed_ids = []
 
@@ -168,19 +173,19 @@ async def test_image_is_scheduled_but_unknown_binary_is_ready(monkeypatch, tmp_p
         processed.set()
 
     monkeypatch.setattr(local_processor, "process_document_isolated", fake_process)
-    request, db = await _request_with_db(tmp_path)
+    scope, db = await _scope_with_db(tmp_path)
     try:
         image = await local_upload.upload_file(
             ChunkedUpload(b"fake image", "photo.png"),
             path="/",
             user_id="local-user",
-            request=request,
+            scope=scope,
         )
         unknown = await local_upload.upload_file(
             ChunkedUpload(b"opaque", "archive.unknown"),
             path="/",
             user_id="local-user",
-            request=request,
+            scope=scope,
         )
         await asyncio.wait_for(processed.wait(), timeout=2)
 
@@ -192,7 +197,6 @@ async def test_image_is_scheduled_but_unknown_binary_is_ready(monkeypatch, tmp_p
 
 
 async def test_text_upload_uses_ten_mib_cap(monkeypatch, tmp_path):
-    monkeypatch.setattr(local_upload.settings, "WORKSPACE_PATH", str(tmp_path))
     monkeypatch.setattr(local_upload, "MAX_TEXT_CONTENT_BYTES", 4)
 
     with pytest.raises(HTTPException) as exc:
@@ -200,7 +204,7 @@ async def test_text_upload_uses_ten_mib_cap(monkeypatch, tmp_path):
             ChunkedUpload(b"12345", "large.md"),
             path="/",
             user_id="local-user",
-            request=None,
+            scope=_scope_senza_db(tmp_path),
         )
 
     assert exc.value.status_code == 413
@@ -209,8 +213,7 @@ async def test_text_upload_uses_ten_mib_cap(monkeypatch, tmp_path):
 
 
 async def test_text_read_and_chunking_run_off_event_loop(monkeypatch, tmp_path):
-    monkeypatch.setattr(local_upload.settings, "WORKSPACE_PATH", str(tmp_path))
-    request, db = await _request_with_db(tmp_path)
+    scope, db = await _scope_with_db(tmp_path)
     caller_thread = threading.get_ident()
     chunk_thread = None
 
@@ -225,7 +228,7 @@ async def test_text_read_and_chunking_run_off_event_loop(monkeypatch, tmp_path):
             ChunkedUpload(b"small text", "notes.md"),
             path="/",
             user_id="local-user",
-            request=request,
+            scope=scope,
         )
     finally:
         await db.close()
@@ -235,8 +238,7 @@ async def test_text_read_and_chunking_run_off_event_loop(monkeypatch, tmp_path):
 
 
 async def test_cancellation_during_commit_leaves_text_fully_indexed(monkeypatch, tmp_path):
-    monkeypatch.setattr(local_upload.settings, "WORKSPACE_PATH", str(tmp_path))
-    request, db = await _request_with_db(tmp_path)
+    scope, db = await _scope_with_db(tmp_path)
     real_commit = db.commit
     commit_started = asyncio.Event()
     release_commit = asyncio.Event()
@@ -253,7 +255,7 @@ async def test_cancellation_during_commit_leaves_text_fully_indexed(monkeypatch,
             ChunkedUpload(payload, "indexed.md"),
             path="/",
             user_id="local-user",
-            request=request,
+            scope=scope,
         )
     )
     try:

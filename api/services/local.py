@@ -147,7 +147,8 @@ class LocalKBService(KBService):
         perdere i rinomini. Quindi: se c'e' si aggiorna, se non c'e' si crea.
         """
         kb, creata = await kb_scope.crea_kb(
-            name, self.radice_base, kb_id, descrizione=description, kind=kind,
+            name, self.radice_base, kb_id,
+            user_id=self.user_id, descrizione=description, kind=kind,
         )
         if creata:
             await asyncio.to_thread(

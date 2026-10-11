@@ -179,7 +179,7 @@ async def _local_lifespan_inner(app: FastAPI):
 
 @asynccontextmanager
 async def _local_lifespan(app: FastAPI):
-    db = await _local_lifespan_inner(app)
+    await _local_lifespan_inner(app)
     from pathlib import Path
     from infra.db.sqlite import create_pool as create_sqlite_pool
     workspace = Path(app.state.workspace_path)

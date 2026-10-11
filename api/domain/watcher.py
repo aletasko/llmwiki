@@ -19,7 +19,7 @@ from pathlib import Path, PurePath
 
 import aiosqlite
 from domain.file_types import PROCESSING_TYPES, SIMPLE_TEXT_TYPES
-from kb_scope import SOTTOCARTELLA_KB
+from kb_scope import e_riservato
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,12 @@ def _should_ignore(
     # riga indicizzerebbe i file di ogni altra wiki nell'indice del
     # legacy, e il corpus di una comparirebbe nei risultati di un'altra.
     # E' il guasto peggiore del giro perche' non da' errore: da' risultati.
-    if parts and parts[0] == SOTTOCARTELLA_KB:
+    #
+    # Il controllo si fa sul percorso RISOLTO, non su quello riferito: un
+    # link `base/scorciatoia -> base/kb/<X>` arriva come
+    # `base/scorciatoia/pagina.md`, il primo segmento e' «scorciatoia», e
+    # guardando la stringa chiesta passerebbe.
+    if e_riservato(path, workspace):
         return True
 
     # Built-in ignores
