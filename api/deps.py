@@ -1,9 +1,12 @@
 import asyncio
 import inspect
 import json
+from pathlib import Path
 from typing import Annotated, AsyncGenerator
 
+import kb_scope
 from fastapi import Depends, Request
+from kb_scope import AmbitoKB
 from scoped_db import ScopedDB
 
 DB_ACQUIRE_TIMEOUT_SECONDS = 10.0
@@ -47,8 +50,39 @@ async def get_user_id(request: Request) -> str:
     return await get_current_user(request)
 
 
+def radice_base(request: Request) -> Path:
+    """La cartella che contiene TUTTE le knowledge base locali.
+
+    Viene dallo stato dell'app, scritto una volta all'avvio: non da
+    `settings.WORKSPACE_PATH` letto per richiesta, perche' una richiesta non
+    deve poter spostare la radice di un'altra.
+    """
+    return Path(request.app.state.workspace_base).resolve()
+
+
+async def get_kb_scope(request: Request) -> AmbitoKB:
+    """La KB di QUESTA richiesta: id nel percorso, altrimenti `X-Wiki-KB`,
+    altrimenti il legacy.
+
+    L'id si legge da `request.path_params` invece di dichiararlo come
+    parametro: cosi' la stessa dipendenza vale per le rotte che hanno
+    `{kb_id}` nel percorso e per quelle che hanno solo un id di documento, e
+    non c'e' una seconda forma della regola da tenere allineata.
+    """
+    kb_id = kb_scope.kb_dalla_richiesta(request, request.path_params.get("kb_id"))
+    return await kb_scope.ambito(kb_id, radice_base(request))
+
+
+def _e_locale(request: Request) -> bool:
+    return getattr(request.app.state, "mode", None) == "local"
+
+
 async def get_user_service(request: Request):
     user_id = await get_user_id(request)
+    if _e_locale(request):
+        return request.app.state.factory.user_service(
+            user_id, scope=await get_kb_scope(request),
+        )
     return request.app.state.factory.user_service(user_id)
 
 
@@ -59,6 +93,10 @@ async def get_kb_service(request: Request):
 
 async def get_document_service(request: Request):
     user_id = await get_user_id(request)
+    if _e_locale(request):
+        return request.app.state.factory.document_service(
+            user_id, scope=await get_kb_scope(request),
+        )
     return request.app.state.factory.document_service(user_id)
 
 
@@ -68,16 +106,16 @@ async def get_scoped_db(
 ) -> AsyncGenerator[ScopedDB, None]:
     """Scoped DB connection.
 
-    In local mode (pool is None, sqlite_db is set), returns a thin wrapper
-    around SQLite — no RLS, no transaction management.
+    In local mode (pool is None), returns a thin wrapper around the SQLite
+    connection OF THE RESOLVED KB — no RLS, no transaction management.
     In hosted mode, returns a proper RLS-enforced Postgres connection.
 
     The branching is on app.state.pool being None, which is set once at startup.
     """
     if pool is None:
-        db = request.app.state.sqlite_db
+        scope = await get_kb_scope(request)
         user_id = await get_user_id(request)
-        yield ScopedDB(None, db, user_id)
+        yield ScopedDB(None, scope.db, user_id)
         return
 
     from auth import get_current_user

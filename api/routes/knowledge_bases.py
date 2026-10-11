@@ -25,7 +25,10 @@ async def get_knowledge_base(kb_id: UUID, service: Annotated[KBService, Depends(
 
 @router.post("", status_code=201)
 async def create_knowledge_base(body: CreateKB, service: Annotated[KBService, Depends(get_kb_service)]):
-    return await service.create(body.name, body.description, body.kind)
+    return await service.create(
+        body.name, body.description, body.kind,
+        str(body.id) if body.id else None,
+    )
 
 
 @router.patch("/{kb_id}")

@@ -105,9 +105,17 @@ async def lifespan(app: FastAPI):
 
 
 async def _local_lifespan_inner(app: FastAPI):
-    """Local mode: SQLite + local filesystem + single-user auth."""
+    """Local mode: SQLite + local filesystem + single-user auth.
+
+    `WORKSPACE_PATH` non e' piu' «il workspace»: e' la RADICE BASE che
+    contiene la KB legacy (nella radice stessa) e tutte le altre sotto
+    `kb/<uuid>/`. Qui si apre solo il legacy; le altre si aprono alla prima
+    richiesta che le nomina (vedi `kb_scope.apri_db`).
+    """
     import uuid
     from pathlib import Path
+
+    import kb_scope
     from infra.db.sqlite import create_pool as create_sqlite_pool
     from infra.storage.local import LocalStorageService
     from infra.auth.local import LocalAuthProvider
@@ -125,30 +133,47 @@ async def _local_lifespan_inner(app: FastAPI):
     auth_provider = LocalAuthProvider(local_user_id)
     storage = LocalStorageService(str(workspace), settings.API_URL)
 
-    # Ensure workspace row exists
+    # L'id della KB legacy si LEGGE, non si indovina: la riga `workspace` di
+    # questo database e' la sua identita', e un id scritto a mano nel codice
+    # che non combacia con la riga sono due nomi per la stessa wiki — uno dei
+    # due non risolve, e nessun errore dice quale.
     cursor = await db.execute("SELECT id FROM workspace LIMIT 1")
-    if not await cursor.fetchone():
-        ws_id = str(uuid.uuid4())
+    riga = await cursor.fetchone()
+    if riga:
+        legacy_id = str(riga[0])
+    else:
+        # Workspace nuovo: l'id e' quello canonico del legacy, non un UUID a
+        # caso. Cosi' una installazione fresca e la produzione risolvono la
+        # KB base con lo stesso id, e «senza indicazione» significa la stessa
+        # cosa in entrambe.
+        legacy_id = kb_scope.KB_LEGACY
         await db.execute(
             "INSERT INTO workspace (id, name, description, user_id) VALUES (?, ?, '', ?)",
-            (ws_id, workspace.name, local_user_id),
+            (legacy_id, workspace.name, local_user_id),
         )
         await db.commit()
         logger.info("Initialized local workspace: %s", workspace)
+    kb_scope.registra_legacy(workspace, legacy_id)
+    kb_scope.registra_connessione(workspace, legacy_id, db)
 
     app.state.mode = "local"
     app.state.pool = None  # No asyncpg pool in local mode
-    app.state.sqlite_db = db
+    app.state.sqlite_db = db  # la connessione del LEGACY, non «la» connessione
     app.state.s3_service = None
     app.state.storage_service = storage
     app.state.ocr_service = None
     app.state.auth_provider = auth_provider
     app.state.workspace_path = str(workspace)
+    app.state.workspace_base = str(workspace)
+    app.state.legacy_kb_id = legacy_id
 
     from services.local import LocalServiceFactory
-    app.state.factory = LocalServiceFactory(db, storage, local_user_id)
+    app.state.factory = LocalServiceFactory(workspace, local_user_id)
 
-    logger.info("Local mode — workspace: %s", workspace)
+    logger.info(
+        "Local mode — radice base: %s · KB legacy: %s · altre KB: %d",
+        workspace, legacy_id, len(kb_scope.kb_registrate(workspace)) - 1,
+    )
     return db
 
 
@@ -192,7 +217,12 @@ async def _local_lifespan(app: FastAPI):
                 pass
         await reconcile_db.close()
         await watcher_db.close()
-        await db.close()
+        # Il legacy sta nella cache di kb_scope come ogni altra KB: lo
+        # chiude quella, insieme a tutte le KB aperte a richiesta. Un
+        # `db.close()` qui lascerebbe aperte le altre.
+        import kb_scope
+
+        await kb_scope.chiudi_tutte(workspace)
 
 
 app = FastAPI(title="LLM Wiki API", lifespan=lifespan)
@@ -248,6 +278,19 @@ if settings.MODE == "local":
         extension_origins=settings.local_extension_origins,
     )
 
+    # Aggiunto per ULTIMO, quindi e' il piu' esterno: una richiesta senza
+    # gettone muore prima di toccare CORS, le rotte e il database. Copre
+    # anche `/v1/files/...` e il WebSocket, che sono le due vie per cui i
+    # dati escono senza passare dai servizi. `/health` resta anonimo.
+    from infra.service_token import ServiceTokenMiddleware, gettone_configurato
+
+    if not gettone_configurato():
+        logger.error(
+            "LLMWIKI_SERVICE_TOKEN non configurato: le rotte dati "
+            "risponderanno 503 finche' non c'e' un gettone",
+        )
+    app.add_middleware(ServiceTokenMiddleware)
+
 if settings.LOGFIRE_TOKEN:
     import logfire
     logfire.instrument_fastapi(app)
@@ -261,12 +304,13 @@ app.include_router(events_router)
 
 if settings.MODE == "local":
     from routes.local_upload import router as local_upload_router
-    from routes.files import router as files_router, set_workspace_root
+    from routes.files import router as files_router
     from routes.local_graph import router as local_graph_router
     app.include_router(local_upload_router)
     app.include_router(files_router)
     app.include_router(local_graph_router)
-    set_workspace_root(settings.WORKSPACE_PATH)
+    # Nessun `set_workspace_root`: la radice non e' piu' una per processo.
+    # La rotta dei file prende quella della KB risolta per la richiesta.
 else:
     from routes.api_keys import router as api_keys_router
     from routes.graph import router as graph_router

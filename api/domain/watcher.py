@@ -19,6 +19,7 @@ from pathlib import Path, PurePath
 
 import aiosqlite
 from domain.file_types import PROCESSING_TYPES, SIMPLE_TEXT_TYPES
+from kb_scope import SOTTOCARTELLA_KB
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,14 @@ def _should_ignore(
 
     relative_str = relative.as_posix()
     parts = relative.parts
+
+    # Le KB nuove vivono sotto `kb/<uuid>/` e hanno il PROPRIO indice. Il
+    # watcher qui gira sulla radice base, cioe' sul legacy: senza questa
+    # riga indicizzerebbe i file di ogni altra wiki nell'indice del
+    # legacy, e il corpus di una comparirebbe nei risultati di un'altra.
+    # E' il guasto peggiore del giro perche' non da' errore: da' risultati.
+    if parts and parts[0] == SOTTOCARTELLA_KB:
+        return True
 
     # Built-in ignores
     for part in parts:

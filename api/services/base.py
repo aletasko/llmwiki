@@ -26,7 +26,16 @@ class KBService(ABC):
     async def get(self, kb_id: str) -> dict | None: ...
 
     @abstractmethod
-    async def create(self, name: str, description: str | None, kind: str | None = None) -> dict: ...
+    async def create(
+        self,
+        name: str,
+        description: str | None,
+        kind: str | None = None,
+        kb_id: str | None = None,
+    ) -> dict:
+        """`kb_id` imposto dal chiamante: il ponte di AGNO manda un id
+        deterministico e rimanda lo stesso POST a ogni riconciliazione."""
+        ...
 
     @abstractmethod
     async def update(self, kb_id: str, name: str | None, description: str | None, kind: str | None = None) -> dict | None: ...
@@ -111,15 +120,19 @@ class DocumentService(ABC):
 
 
 class ServiceFactory(ABC):
+    """`scope` e' l'ambito della knowledge base risolto per la richiesta
+    (vedi `kb_scope.AmbitoKB`). La modalita' locale lo PRETENDE: una
+    radice e un database per KB. La modalita' ospitata lo ignora, perche'
+    la separazione la fa RLS su Postgres."""
 
     @abstractmethod
-    def user_service(self, user_id: str) -> UserService: ...
+    def user_service(self, user_id: str, scope=None) -> UserService: ...
 
     @abstractmethod
     def kb_service(self, user_id: str) -> KBService: ...
 
     @abstractmethod
-    def document_service(self, user_id: str) -> DocumentService: ...
+    def document_service(self, user_id: str, scope=None) -> DocumentService: ...
 
     @abstractmethod
     def public_wiki_service(self) -> PublicWikiService: ...

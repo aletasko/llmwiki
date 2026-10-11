@@ -27,6 +27,11 @@ class CreateKB(BaseModel):
     name: str
     description: str | None = None
     kind: Literal["wiki", "course"] | None = None
+    # Id imposto dal chiamante. Il ponte di AGNO lo deriva dal record del
+    # wiki in MYH (UUID deterministico) e rimanda lo stesso POST a ogni
+    # riconciliazione: con l'id, il secondo giro e' un no-op invece di una
+    # seconda wiki identica.
+    id: UUID | None = None
 
 
 class UpdateKB(BaseModel):

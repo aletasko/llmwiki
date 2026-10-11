@@ -160,7 +160,21 @@ class HostedKBService(KBService):
         )
         return dict(row) if row else None
 
-    async def create(self, name: str, description: str | None, kind: str | None = None) -> dict:
+    async def create(
+        self,
+        name: str,
+        description: str | None,
+        kind: str | None = None,
+        kb_id: str | None = None,
+    ) -> dict:
+        if kb_id is not None:
+            # In hosted mode the id is a Postgres default shared with RLS
+            # policies and foreign keys. Accepting a client-assigned one
+            # silently would let a caller aim at another tenant's row.
+            raise HTTPException(
+                status_code=400,
+                detail="Client-assigned knowledge base ids aren't supported in hosted mode",
+            )
         await self._check_capacity()
         slug = await self._unique_slug(name)
         row = await self._insert_kb(name, slug, description, kind or "wiki")
@@ -1286,13 +1300,13 @@ class HostedServiceFactory(ServiceFactory):
         self.s3 = s3
         self.ocr = ocr
 
-    def user_service(self, user_id: str) -> HostedUserService:
+    def user_service(self, user_id: str, scope=None) -> HostedUserService:
         return HostedUserService(self.pool, user_id)
 
     def kb_service(self, user_id: str) -> HostedKBService:
         return HostedKBService(self.pool, user_id, self.s3)
 
-    def document_service(self, user_id: str) -> HostedDocumentService:
+    def document_service(self, user_id: str, scope=None) -> HostedDocumentService:
         return HostedDocumentService(self.pool, user_id, self.s3)
 
     def public_wiki_service(self) -> HostedPublicWikiService:

@@ -33,9 +33,14 @@ async def list_knowledge_base_events(
 ) -> dict:
     """Return an owner-only, newest-first page of immutable raw events."""
     if request.app.state.mode == "local":
-        db = request.app.state.sqlite_db
-        await _require_local_ownership(db, kb_id, user_id)
-        rows = await _fetch_local_events(db, kb_id, user_id, limit, before)
+        # L'ambito si risolve QUI e non come dipendenza della firma: in
+        # modalita' ospitata non esiste una radice di workspace, e una
+        # dipendenza dichiarata girerebbe anche la'.
+        from deps import get_kb_scope
+
+        scope = await get_kb_scope(request)
+        await _require_local_ownership(scope.db, user_id)
+        rows = await _fetch_local_events(scope.db, user_id, limit, before)
     else:
         pool = request.app.state.pool
         await _require_hosted_ownership(pool, kb_id, user_id)
@@ -84,11 +89,15 @@ def _iso_timestamp(value: datetime | str) -> str:
 
 
 async def _require_local_ownership(
-    db: aiosqlite.Connection, kb_id: UUID, user_id: str,
+    db: aiosqlite.Connection, user_id: str,
 ) -> None:
+    """L'identita' della KB l'ha gia' provata l'ambito: questa connessione
+    E' il database di quella wiki. Qui resta da verificare il PROPRIETARIO,
+    e quindi non si filtra piu' per `id` — un id della riga diverso da
+    quello della cartella svuoterebbe il feed senza dire niente."""
     cursor = await db.execute(
-        "SELECT 1 FROM workspace WHERE id = ? AND user_id = ?",
-        (str(kb_id), user_id),
+        "SELECT 1 FROM workspace WHERE user_id = ? LIMIT 1",
+        (user_id,),
     )
     if await cursor.fetchone() is None:
         raise HTTPException(status_code=404, detail="Wiki not found")
@@ -106,17 +115,21 @@ async def _require_hosted_ownership(
 
 
 async def _fetch_local_events(
-    db: aiosqlite.Connection, kb_id: UUID, user_id: str,
+    db: aiosqlite.Connection, user_id: str,
     limit: int, before: int | None,
 ) -> list[dict]:
+    # Nessun filtro per knowledge_base_id: in modalita' locale QUESTO
+    # database contiene gli eventi di UNA wiki sola, e filtrare per un id
+    # che potrebbe non combaciare con la cartella renderebbe il feed vuoto
+    # invece di sbagliato — un guasto che non da' errore.
     cursor_clause = " AND id < ?" if before is not None else ""
-    params: list[Any] = [str(kb_id), user_id]
+    params: list[Any] = [user_id]
     if before is not None:
         params.append(before)
     params.append(limit + 1)
     cursor = await db.execute(
         f"SELECT {_EVENT_COLUMNS} FROM knowledge_base_events "
-        "WHERE knowledge_base_id = ? AND user_id = ?"
+        "WHERE user_id = ?"
         f"{cursor_clause} ORDER BY id DESC LIMIT ?",
         tuple(params),
     )

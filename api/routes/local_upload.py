@@ -13,11 +13,12 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import settings
-from deps import get_user_id
+import kb_scope
+from deps import get_kb_scope, get_user_id
 from domain.file_types import PROCESSING_TYPES, SIMPLE_TEXT_TYPES
 from domain.watcher import mark_written
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from kb_scope import AmbitoKB
 from services.types import MAX_TEXT_CONTENT_BYTES
 
 router = APIRouter(tags=["upload"])
@@ -111,15 +112,26 @@ def _publish_and_mark(source: Path, destination: Path, state: dict[str, bool]) -
     state["published"] = True
 
 
-def _workspace_root() -> Path:
-    return Path(settings.WORKSPACE_PATH).resolve()
+def _safe_resolve(radice: Path, relative: str) -> Path:
+    """Dentro la radice DELLA KB chiesta, non dentro `WORKSPACE_PATH`.
 
-
-def _safe_resolve(relative: str) -> Path:
-    ws = _workspace_root()
-    resolved = (ws / relative).resolve()
-    if not resolved.is_relative_to(ws):
+    Con la radice globale un upload finiva nell'albero del legacy
+    qualunque wiki lo avesse chiesto: il file c'era, la riga stava
+    nell'indice giusto, e il documento risultava illeggibile senza che
+    niente avesse dato errore."""
+    resolved = (radice / relative).resolve()
+    if not resolved.is_relative_to(radice):
         raise HTTPException(status_code=400, detail="Path escapes workspace")
+    # La radice del legacy CONTIENE `kb/<altra-wiki>/`: senza questo
+    # controllo un upload con percorso `kb/<altra>/wiki/` scriverebbe
+    # nell'albero di un'altra wiki, e il controllo sopra direbbe si'
+    # perche' quel file e' davvero sotto la radice. Lo stesso per
+    # `.llmwiki/`, dove sta l'indice.
+    if kb_scope.e_riservato(resolved, radice):
+        raise HTTPException(
+            status_code=400,
+            detail="Path points into a reserved directory (kb/ or .llmwiki/)",
+        )
     return resolved
 
 
@@ -192,15 +204,15 @@ async def upload_file(
     file: UploadFile = File(...),
     path: str = Form(default="/"),
     user_id: str = Depends(get_user_id),
-    request: Request = None,
+    scope: AmbitoKB = Depends(get_kb_scope),
 ):
-    """Upload a file directly into the workspace and index it."""
+    """Upload a file directly into the KB workspace and index it."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
 
     filename = file.filename
     relative = (path.rstrip("/") + "/" + filename).lstrip("/")
-    dest = _safe_resolve(relative)
+    dest = _safe_resolve(scope.radice, relative)
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     max_bytes = MAX_TEXT_CONTENT_BYTES if ext in SIMPLE_TEXT_TYPES else MAX_LOCAL_UPLOAD_BYTES
     staged = await _stream_upload_to_temp(file, dest, max_bytes=max_bytes)
@@ -232,7 +244,7 @@ async def upload_file(
 
         from infra.db.sqlite import SQLiteDocumentRepository, serialized_write
 
-        db = request.app.state.sqlite_db
+        db = scope.db
         doc_repo = SQLiteDocumentRepository(db)
         doc_id = str(uuid.uuid4())
         publish_state = {"published": False}
@@ -325,7 +337,7 @@ async def upload_file(
         if needs_processing:
             from domain.local_processor import process_document_isolated
 
-            asyncio.create_task(process_document_isolated(_workspace_root(), doc_id))
+            asyncio.create_task(process_document_isolated(scope.radice, doc_id))
 
         if deferred_cancellation is not None:
             raise deferred_cancellation
